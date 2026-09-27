@@ -53,16 +53,16 @@ Les condensateurs sont utilisés pour assurer le découplage local des circuits 
 
 Pour le placement des composants il est important que les condensateurs de découplage soient placés au plus près des composants qu’ils doivent découpler afin de réduire la longueur des connexions.
 
-Structure du projet :
+## Structure du projet
 
-.            
+```text
+.
+└── Code_boussole 	       # code du projet               
     ├── Projet1.kicad_sch      # Schéma principal
     ├── Projet1.kicad_pcb      # Circuit imprimé
     ├── LED20.kicad_sch        # Schéma de l'affichage LED
-    ├──README.md              # Documentation du projet
-    └── Code_boussole 	       # code du projet 
-
-
+    └── README.md              # Documentation du projet
+```
 Améliorations futures :
 
 Passer sur batterie (LiPo / Li-Ion) : Ajoute un régulateur de charge USB et un circuit de basculement automatique entre l'USB et la batterie
