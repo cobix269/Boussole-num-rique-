@@ -4,11 +4,12 @@ NORHALO est un projet de boussole numérique réalisé à l’aide d’un PCB qu
 
 
 
-Figure 1 & 2 :     <img width="221" height="174" alt="image" src="https://github.com/user-attachments/assets/7652ea36-8b13-480d-88f8-444b1e5ff32d" />
+**Figure 1 & 2 : visualisation 3D du PCB **  :    
+  <img width="221" height="174" alt="image" src="https://github.com/user-attachments/assets/7652ea36-8b13-480d-88f8-444b1e5ff32d" />
 
   <img width="209" height="175" alt="image" src="https://github.com/user-attachments/assets/93d80f8e-d5fb-4357-ba00-c13d786a4074" />
 
-À propos :
+## À propos :
 
 Le projet est réalisé sous KiCad et comprend actuellement la conception du schéma électronique ainsi que celle du circuit imprimé et le code a implémenté dans le microcontrôleur.
 
@@ -39,7 +40,7 @@ Les données des capteurs sont traitées par le STM32G071KBTxN, qui peut déterm
 
 Le code permet de fusionner ces données pour calculer un cap précis (compensé en inclinaison), puis met à jour l'écran central et pilote les LEDs (WS2812B) afin d'indiquer l'orientation.
 
-Alimentation :
+## Alimentation :
 
 La carte est prévue pour être alimentée via USB-C.
 
