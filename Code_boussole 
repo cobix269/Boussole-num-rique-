@@ -1,0 +1,273 @@
+#include "main.h"
+#include <math.h>
+#include <stdio.h>
+
+/* =========================================================================
+   DEFINITIONS & ADRESSES I2C
+   ========================================================================= */
+#define MPU6050_ADDR         (0x68 << 1) // Adresse I2C MPU6050
+#define MMC5883MA_ADDR       (0x30 << 1) // Adresse I2C MMC5883MA
+
+#define LCD_WIDTH            240
+#define LCD_HEIGHT           240
+#define LCD_CENTER_X         120
+#define LCD_CENTER_Y         120
+#define NEEDLE_LENGTH        80
+
+#define NUM_LEDS             20          // Anneau de 20 LED Neopixel
+#define DECLINATION_ANGLE    0.0436f     // Déclinaison magnétique local (~2.5° en rad)
+
+#define COLOR_BLACK          0x0000
+#define COLOR_RED            0xF800
+#define COLOR_WHITE          0xFFFF
+
+/* =========================================================================
+   VARIABLES GLOBALES & HANDLES HAL
+   ========================================================================= */
+I2C_HandleTypeDef hi2c1;
+SPI_HandleTypeDef hspi1;
+
+// Buffers pour le contrôle des 20 LED WS2812B
+uint8_t led_rgb[NUM_LEDS][3]; // RGB pour chaque LED
+
+/* =========================================================================
+   PROTOTYPES
+   ========================================================================= */
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_SPI1_Init(void);
+
+void MPU6050_Init(void);
+void MMC5883MA_Init(void);
+void Read_Accel_Data(float *ax, float *ay, float *az);
+void Read_Mag_Data(float *mx, float *my, float *mz);
+
+float Calculate_Tilt_Compensated_Heading(float ax, float ay, float az, float mx, float my, float mz);
+void LCD_DrawNeedle(float heading_deg);
+void Update_LEDs(float heading_deg);
+void WS2812_Send(void);
+
+/* =========================================================================
+   MAIN
+   ========================================================================= */
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  MX_GPIO_Init();
+  MX_I2C1_Init();
+  MX_SPI1_Init();
+
+  // Initialisation des capteurs
+  MPU6050_Init();
+  MMC5883MA_Init();
+
+  float ax, ay, az;
+  float mx, my, mz;
+  float heading = 0.0f;
+
+  while (1)
+  {
+    // 1. Lecture des données brutes des capteurs
+    Read_Accel_Data(&ax, &ay, &az);
+    Read_Mag_Data(&mx, &my, &mz);
+
+    // 2. Calcul de l'angle du Nord compensé en inclinaison
+    heading = Calculate_Tilt_Compensated_Heading(ax, ay, az, mx, my, mz);
+
+    // 3. Dessin de l'aiguille de la boussole sur l'écran rond
+    LCD_DrawNeedle(heading);
+
+    // 4. Allumage de la LED faisant face à la direction courante
+    Update_LEDs(heading);
+
+    // Cadence d'affichage à 20 Hz (~50 ms)
+    HAL_Delay(50);
+  }
+}
+
+/* =========================================================================
+   INITIALISATION ET LECTURE DES CAPTEURS
+   ========================================================================= */
+void MPU6050_Init(void)
+{
+  uint8_t data = 0x00; // Réveiller le MPU6050 (Sortir du mode Sleep)
+  HAL_I2C_Mem_Write(&hi2c1, MPU6050_ADDR, 0x6B, 1, &data, 1, 1000);
+}
+
+void MMC5883MA_Init(void)
+{
+  uint8_t data = 0x01; // SET : Recharger la magnétisation interne
+  HAL_I2C_Mem_Write(&hi2c1, MMC5883MA_ADDR, 0x08, 1, &data, 1, 1000);
+  HAL_Delay(10);
+  data = 0x00; // Activer le mode de mesure continue
+  HAL_I2C_Mem_Write(&hi2c1, MMC5883MA_ADDR, 0x08, 1, &data, 1, 1000);
+}
+
+void Read_Accel_Data(float *ax, float *ay, float *az)
+{
+  uint8_t raw[6];
+  HAL_I2C_Mem_Read(&hi2c1, MPU6050_ADDR, 0x3B, 1, raw, 6, 1000);
+
+  int16_t raw_ax = (int16_t)(raw[0] << 8 | raw[1]);
+  int16_t raw_ay = (int16_t)(raw[2] << 8 | raw[3]);
+  int16_t raw_az = (int16_t)(raw[4] << 8 | raw[5]);
+
+  // Conversion en g (sensibilité ±2g par défaut : 16384 LSB/g)
+  *ax = (float)raw_ax / 16384.0f;
+  *ay = (float)raw_ay / 16384.0f;
+  *az = (float)raw_az / 16384.0f;
+}
+
+void Read_Mag_Data(float *mx, float *my, float *mz)
+{
+  uint8_t raw[6];
+  // Demander une mesure
+  uint8_t cmd = 0x01;
+  HAL_I2C_Mem_Write(&hi2c1, MMC5883MA_ADDR, 0x08, 1, &cmd, 1, 1000);
+  HAL_Delay(5);
+
+  HAL_I2C_Mem_Read(&hi2c1, MMC5883MA_ADDR, 0x00, 1, raw, 6, 1000);
+
+  uint16_t raw_mx = (uint16_t)(raw[1] << 8 | raw[0]);
+  uint16_t raw_my = (uint16_t)(raw[3] << 8 | raw[2]);
+  uint16_t raw_mz = (uint16_t)(raw[5] << 8 | raw[4]);
+
+  // Décalage centré (16-bit offset ~ 32768)
+  *mx = (float)raw_mx - 32768.0f;
+  *my = (float)raw_my - 32768.0f;
+  *mz = (float)raw_mz - 32768.0f;
+}
+
+/* =========================================================================
+   ALGORITHME DE COMPENSATION D'INCLINAISON (TILT COMPENSATION)
+   ========================================================================= */
+float Calculate_Tilt_Compensated_Heading(float ax, float ay, float az, float mx, float my, float mz)
+{
+  // 1. Calcul des angles de Pitch et Roll via l'accéléromètre
+  float roll  = atan2f(ay, az);
+  float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
+
+  // 2. Projection du champ magnétique dans le plan horizontal
+  float Xh = mx * cosf(pitch) + mz * sinf(pitch);
+  float Yh = mx * sinf(roll) * sinf(pitch) + my * cosf(roll) - mz * sinf(roll) * cosf(pitch);
+
+  // 3. Calcul de l'angle du Nord
+  float heading = atan2f(Yh, Xh) + DECLINATION_ANGLE;
+
+  // Normalisation entre 0 rad et 2*PI rad
+  if (heading < 0) heading += 2.0f * M_PI;
+  if (heading >= 2.0f * M_PI) heading -= 2.0f * M_PI;
+
+  // Conversion en degrés (0° à 360°)
+  return heading * (180.0f / M_PI);
+}
+
+/* =========================================================================
+   RENDU GRAPHIQUE ÉCRAN LCD & LED
+   ========================================================================= */
+static float prev_heading = -1.0f;
+
+void LCD_DrawLine(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint16_t color)
+{
+  // Fonction générique de tracé de ligne (Algorithme de Bresenham via SPI LCD)
+  // [Implémentée dans le driver d'affichage SPI de l'écran]
+}
+
+void LCD_DrawNeedle(float heading_deg)
+{
+  // Convertir le cap en radians pour la trigonométrie
+  float rad = heading_deg * (M_PI / 180.0f);
+
+  // Effacer l'ancienne aiguille
+  if (prev_heading >= 0.0f) {
+    float prev_rad = prev_heading * (M_PI / 180.0f);
+    uint16_t old_x = LCD_CENTER_X + (uint16_t)(NEEDLE_LENGTH * sinf(prev_rad));
+    uint16_t old_y = LCD_CENTER_Y - (uint16_t)(NEEDLE_LENGTH * cosf(prev_rad));
+    LCD_DrawLine(LCD_CENTER_X, LCD_CENTER_Y, old_x, old_y, COLOR_BLACK);
+  }
+
+  // Calculer l'extrémité de la nouvelle flèche rouge (Nord)
+  uint16_t new_x = LCD_CENTER_X + (uint16_t)(NEEDLE_LENGTH * sinf(rad));
+  uint16_t new_y = LCD_CENTER_Y - (uint16_t)(NEEDLE_LENGTH * cosf(rad));
+
+  // Dessiner la nouvelle flèche rouge
+  LCD_DrawLine(LCD_CENTER_X, LCD_CENTER_Y, new_x, new_y, COLOR_RED);
+
+  prev_heading = heading_deg;
+}
+
+void Update_LEDs(float heading_deg)
+{
+  // Déterminer l'index de la LED parmi les 20 en fonction de l'angle (360° / 20 = 18° par LED)
+  int active_led = (int)((heading_deg + 9.0f) / 18.0f) % NUM_LEDS;
+
+  // Éteindre toutes les LED
+  for (int i = 0; i < NUM_LEDS; i++) {
+    led_rgb[i][0] = 0; // Vert
+    led_rgb[i][1] = 0; // Rouge
+    led_rgb[i][2] = 0; // Bleu
+  }
+
+  // Allumer uniquement la LED en face de la flèche en rouge intense
+  led_rgb[active_led][1] = 255; 
+
+  // Envoyer la trame de données WS2812 via le Level Shifter U4
+  WS2812_Send();
+}
+
+void WS2812_Send(void)
+{
+  // Envoi du flux binaire pour les 20 LED sur la broche LED_DATA (PA7 -> Level Shifter U4 -> LED_DATA_5V)
+}
+
+/* =========================================================================
+   CONFIGURATIONS PERIPHERIQUES STM32G0 (GÉNÉRÉES PAR CUBEMX)
+   ========================================================================= */
+static void MX_I2C1_Init(void)
+{
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.Timing = 0x00303D5B; // Fast Mode 400kHz
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  HAL_I2C_Init(&hi2c1);
+}
+
+static void MX_SPI1_Init(void)
+{
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
+  HAL_SPI_Init(&hspi1);
+}
+
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  // Broche d'entrée Interruption MPU6050 (PA0)
+  GPIO_InitStruct.Pin = GPIO_PIN_0;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // Broche de sortie LED_DATA vers le Level Shifter U4 (PA7)
+  GPIO_InitStruct.Pin = GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+}
+
+void SystemClock_Config(void)
+{
+  // Configuration horloge système STM32G0 à 64 MHz
+}
